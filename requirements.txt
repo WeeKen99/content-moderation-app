@@ -8,3 +8,13 @@ pandas>=1.5.0
 plotly>=5.15.0
 numpy>=1.24.0
 Pillow>=9.5.0
+
+streamlit
+transformers
+torch
+sentencepiece
+scikit-learn
+pandas
+plotly
+langdetect
+huggingface-hub
