@@ -14,19 +14,18 @@ def load_models():
     models = {}
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    # Load the two separate mBERT models from the Hub
-    st.write("Loading mBERT models...")
+    # Use print() for log messages so they don't appear on the UI
+    print("Loading mBERT models...")
     models['binary_model'] = AutoModelForSequenceClassification.from_pretrained("WeeKen-99/binary").to(device).eval()
     models['target_model'] = AutoModelForSequenceClassification.from_pretrained("WeeKen-99/mBERT_TargetGroup").to(device).eval()
     models['tokenizer'] = AutoTokenizer.from_pretrained("WeeKen-99/mBERT_TargetGroup")
     models['device'] = device
-    st.write("mBERT models loaded.")
+    print("mBERT models loaded.")
 
-    # --- FIX: Load SVMs from Hugging Face Hub with correct filenames ---
-    st.write("Loading SVM models...")
+    print("Loading SVM models...")
     svm_repo_id = "WeeKen-99/SVM-model"
     
-    # Download each file using the correct name from your screenshot
+    # Download each SVM file using the correct name
     tfidf_path = hf_hub_download(repo_id=svm_repo_id, filename='tfidf_vectorizer.pkl')
     svm_model_path = hf_hub_download(repo_id=svm_repo_id, filename='svm_multi_output_model.pkl')
     le_gold_path = hf_hub_download(repo_id=svm_repo_id, filename='label_encoder_gold.pkl')
@@ -35,7 +34,7 @@ def load_models():
     models['tfidf_vectorizer'] = joblib.load(tfidf_path)
     models['svm_model'] = joblib.load(svm_model_path)
     models['label_encoder_gold'] = joblib.load(le_gold_path)
-    st.write("SVM models loaded.")
+    print("SVM models loaded.")
     
     return models
 
@@ -50,18 +49,22 @@ def predict_with_mbert(text: str):
     """Runs the two-stage moderation pipeline using the mBERT models."""
     inputs = models['tokenizer'](text, return_tensors="pt", truncation=True, padding=True, max_length=512).to(models['device'])
     
+    # Stage 1: Binary classification
     with torch.no_grad():
         binary_logits = models['binary_model'](**inputs).logits
         binary_prediction = torch.argmax(binary_logits, dim=-1).item()
         
+    # If not hateful, return immediately
     if binary_prediction == 0:
         return {"is_hate_speech": False, "hate_speech_confidence": 0.0, "target_group": "N/A", "suggested_action": "APPROVE", "model_used": "mBERT"}
 
+    # Stage 2: Target group classification (only if hateful)
     with torch.no_grad():
         target_logits = models['target_model'](**inputs).logits
         target_prediction_id = torch.argmax(target_logits, dim=-1).item()
         target_group = TARGET_GROUP_LABELS_MBERT[target_prediction_id]
 
+    # Note: Confidence/Action logic might need adjustment based on your binary model's output
     return {"is_hate_speech": True, "hate_speech_confidence": 1.0, "target_group": target_group, "suggested_action": "FLAG_FOR_REVIEW", "model_used": "mBERT"}
 
 def predict_with_svm(text: str):
@@ -74,8 +77,7 @@ def predict_with_svm(text: str):
     # Get prediction from the multi-output model. Assuming it returns a list/tuple.
     prediction = svm_model.predict(vec_text)[0]
     
-    # --- NOTE: Assumption about your SVM model's output ---
-    # This code assumes prediction[0] is the hate/non-hate class (1 for hate)
+    # Note: This code assumes prediction[0] is the hate/non-hate class (1 for hate)
     # and prediction[1] is the target group class. You may need to adjust this.
     is_hate = prediction[0] == 1
     target_group = le_gold.inverse_transform([prediction[1]])[0] if is_hate else "N/A"
@@ -98,7 +100,7 @@ def process_text(text: str, mode: str):
     elif mode == 'mBERT (ZH, MS, EN)': return predict_with_mbert(text)
     elif mode == 'SVM (Tamil)': return predict_with_svm(text)
 
-# --- (The Streamlit UI part of your code remains exactly the same) ---
+# --- Streamlit User Interface ---
 st.set_page_config(layout="wide")
 st.title("Enhanced Content Moderation Dashboard")
 st.markdown("Analyze comments, visualize results, and manually correct predictions.")
@@ -106,4 +108,97 @@ st.markdown("Analyze comments, visualize results, and manually correct predictio
 if 'final_df' not in st.session_state:
     st.session_state.final_df = None
 
-# (The rest of your UI code follows here...)
+st.markdown("### Analyze a Single Comment")
+text_input = st.text_area("Enter the text you want to analyze:", height=100)
+single_analysis_mode = st.selectbox(
+    "Choose the analysis mode for this comment:",
+    ('Auto-Detect Language', 'mBERT (ZH, MS, EN)', 'SVM (Tamil)'),
+    key='single_mode'
+)
+
+if st.button("Analyze Text"):
+    if text_input:
+        with st.spinner("Analyzing text..."):
+            result = process_text(text_input, single_analysis_mode)
+            st.write("#### Analysis Result:")
+            st.json(result)
+    else:
+        st.warning("Please enter some text to analyze.")
+
+st.markdown("---")
+st.markdown("### Analyze Comments from a CSV File")
+
+uploaded_file = st.file_uploader("Upload a CSV file with your comments", type="csv")
+
+if uploaded_file is not None:
+    try:
+        df = pd.read_csv(uploaded_file)
+        
+        st.markdown("#### Step 1: Choose the analysis mode for the CSV")
+        csv_analysis_mode = st.selectbox("How should the model be selected?", ('Auto-Detect Language', 'mBERT (ZH, MS, EN)', 'SVM (Tamil)'), key='csv_mode')
+        
+        st.markdown("#### Step 2: Select the column containing the text")
+        text_column = st.selectbox("Which column has the comments?", df.columns)
+        
+        st.markdown("#### Step 3: Run the analysis")
+        if st.button("Analyze Comments"):
+            with st.spinner(f"Analyzing using '{csv_analysis_mode}' mode..."):
+                results = df[text_column].apply(lambda text: process_text(text, csv_analysis_mode))
+                results_df = pd.json_normalize(results)
+                st.session_state.final_df = pd.concat([df, results_df], axis=1)
+                st.success("Analysis complete! View the charts and table below.")
+
+        if st.session_state.final_df is not None:
+            st.markdown("---")
+            st.markdown("### Dashboard Analytics for CSV")
+
+            col1, col2 = st.columns(2)
+            with col1:
+                action_counts = st.session_state.final_df['suggested_action'].value_counts()
+                fig_action = px.pie(values=action_counts.values, names=action_counts.index, title='Moderation Actions Distribution',
+                                      color_discrete_map={'APPROVE':'green', 'FLAG_FOR_REVIEW':'orange', 'REJECT':'red'})
+                st.plotly_chart(fig_action, use_container_width=True)
+
+            with col2:
+                hateful_comments = st.session_state.final_df[st.session_state.final_df['is_hate_speech'] == True]
+                target_counts = hateful_comments['target_group'].dropna().value_counts()
+                if not target_counts.empty:
+                    fig_target = px.bar(x=target_counts.index, y=target_counts.values, title='Hate Speech Target Group Distribution',
+                                        labels={'x':'Target Group', 'y':'Count'})
+                    st.plotly_chart(fig_target, use_container_width=True)
+                else:
+                    st.write("No hate speech detected to show target group chart.")
+
+            st.markdown("---")
+            st.markdown("### Review and Correct Predictions for CSV")
+            st.info("You can manually change the 'suggested_action' for any row in the table below.")
+            
+            edited_df = st.data_editor(
+                st.session_state.final_df,
+                column_config={
+                    "suggested_action": st.column_config.SelectboxColumn(
+                        "Suggested Action",
+                        help="Manually override the model's suggestion",
+                        options=["APPROVE", "FLAG_FOR_REVIEW", "REJECT"],
+                        required=True,
+                    )
+                },
+                use_container_width=True,
+                num_rows="dynamic"
+            )
+            
+            st.session_state.final_df = edited_df
+
+            @st.cache_data
+            def convert_df_to_csv(df_to_convert):
+                return df_to_convert.to_csv(index=False).encode('utf-8')
+
+            csv_output = convert_df_to_csv(st.session_state.final_df)
+            st.download_button(
+                label="📥 Download Corrected Results as CSV",
+                data=csv_output,
+                file_name=f'corrected_moderation_results.csv',
+                mime='text/csv',
+            )
+    except Exception as e:
+        st.error(f"An error occurred: {e}")
