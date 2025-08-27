@@ -49,22 +49,18 @@ def predict_with_mbert(text: str):
     """Runs the two-stage moderation pipeline using the mBERT models."""
     inputs = models['tokenizer'](text, return_tensors="pt", truncation=True, padding=True, max_length=512).to(models['device'])
     
-    # Stage 1: Binary classification
     with torch.no_grad():
         binary_logits = models['binary_model'](**inputs).logits
         binary_prediction = torch.argmax(binary_logits, dim=-1).item()
         
-    # If not hateful, return immediately
     if binary_prediction == 0:
         return {"is_hate_speech": False, "hate_speech_confidence": 0.0, "target_group": "N/A", "suggested_action": "APPROVE", "model_used": "mBERT"}
 
-    # Stage 2: Target group classification (only if hateful)
     with torch.no_grad():
         target_logits = models['target_model'](**inputs).logits
         target_prediction_id = torch.argmax(target_logits, dim=-1).item()
         target_group = TARGET_GROUP_LABELS_MBERT[target_prediction_id]
 
-    # Note: Confidence/Action logic might need adjustment based on your binary model's output
     return {"is_hate_speech": True, "hate_speech_confidence": 1.0, "target_group": target_group, "suggested_action": "FLAG_FOR_REVIEW", "model_used": "mBERT"}
 
 def predict_with_svm(text: str):
@@ -74,11 +70,8 @@ def predict_with_svm(text: str):
     le_gold = models['label_encoder_gold']
 
     vec_text = vectorizer.transform([text])
-    # Get prediction from the multi-output model. Assuming it returns a list/tuple.
     prediction = svm_model.predict(vec_text)[0]
     
-    # Note: This code assumes prediction[0] is the hate/non-hate class (1 for hate)
-    # and prediction[1] is the target group class. You may need to adjust this.
     is_hate = prediction[0] == 1
     target_group = le_gold.inverse_transform([prediction[1]])[0] if is_hate else "N/A"
     
@@ -108,22 +101,47 @@ st.markdown("Analyze comments, visualize results, and manually correct predictio
 if 'final_df' not in st.session_state:
     st.session_state.final_df = None
 
+# --- IMPROVED UI SECTION ---
 st.markdown("### Analyze a Single Comment")
-text_input = st.text_area("Enter the text you want to analyze:", height=100)
-single_analysis_mode = st.selectbox(
-    "Choose the analysis mode for this comment:",
-    ('Auto-Detect Language', 'mBERT (ZH, MS, EN)', 'SVM (Tamil)'),
-    key='single_mode'
-)
 
-if st.button("Analyze Text"):
-    if text_input:
-        with st.spinner("Analyzing text..."):
-            result = process_text(text_input, single_analysis_mode)
-            st.write("#### Analysis Result:")
-            st.json(result)
-    else:
-        st.warning("Please enter some text to analyze.")
+col1, col2 = st.columns(2)
+
+with col1:
+    text_input = st.text_area("Enter the text you want to analyze:", height=150)
+    single_analysis_mode = st.selectbox(
+        "Choose the analysis mode for this comment:",
+        ('Auto-Detect Language', 'mBERT (ZH, MS, EN)', 'SVM (Tamil)'),
+        key='single_mode'
+    )
+    analyze_button = st.button("Analyze Text")
+
+with col2:
+    if analyze_button:
+        if text_input.strip():
+            with st.spinner("Analyzing text..."):
+                result = process_text(text_input, single_analysis_mode)
+                
+                st.write("#### Analysis Result:")
+
+                action = result['suggested_action']
+                if action == "APPROVE":
+                    st.success(f"**Suggested Action: {action}**")
+                elif action == "FLAG_FOR_REVIEW":
+                    st.warning(f"**Suggested Action: {action}**")
+                else:
+                    st.error(f"**Suggested Action: {action}**")
+
+                st.write(f"**Model Used:** `{result['model_used']}`")
+                st.write(f"**Hate Speech Detected:** `{result['is_hate_speech']}`")
+                st.write(f"**Target Group:** `{result['target_group']}`")
+                
+                if result['hate_speech_confidence'] is not None:
+                    st.metric(label="Hate Speech Confidence", value=f"{result['hate_speech_confidence']:.2%}")
+
+                with st.expander("Show raw JSON output"):
+                    st.json(result)
+        else:
+            st.warning("Please enter some text to analyze.")
 
 st.markdown("---")
 st.markdown("### Analyze Comments from a CSV File")
