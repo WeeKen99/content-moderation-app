@@ -1,0 +1,10 @@
+streamlit>=1.28.0
+transformers>=4.30.0
+torch>=2.0.0
+sentencepiece
+
+# Optional libraries if your app uses them for other features
+pandas>=1.5.0
+plotly>=5.15.0
+numpy>=1.24.0
+Pillow>=9.5.0
