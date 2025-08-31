@@ -77,9 +77,7 @@ def predict_with_mbert(text: str, threshold: float):
     
     with torch.no_grad():
         binary_logits = models['binary_model'](**inputs).logits
-        # Get probabilities using softmax
         binary_probs = F.softmax(binary_logits, dim=-1)
-        # Get the probability of the 'hateful' class (assuming it's class 1)
         hate_prob = binary_probs[0][1].item()
 
     is_hate_speech = hate_prob > threshold
@@ -87,7 +85,6 @@ def predict_with_mbert(text: str, threshold: float):
     if not is_hate_speech:
         return {"is_hate_speech": False, "hate_speech_confidence": hate_prob, "target_group": "N/A", "suggested_action": "APPROVE", "model_used": "mBERT"}
 
-    # If it is hate speech, proceed to find the target group
     with torch.no_grad():
         target_logits = models['target_model'](**inputs).logits
         target_prediction_id = torch.argmax(target_logits, dim=-1).item()
@@ -104,28 +101,28 @@ def predict_with_svm(text: str, threshold: float):
 
     hate_prob = 0.0
     is_hate = False
+    target_group = "N/A"
     
-    # Try to use predict_proba for confidence scores. Fallback to predict if not available.
     try:
-        # Assumes the first output of the multi-output model is for hate speech classification
-        # and returns probabilities for [class_0, class_1]
         probabilities = svm_model.predict_proba(vec_text)
-        hate_prob = probabilities[0][0][1] # Prob of hate for the first classifier
+        hate_prob = probabilities[0][0][1] 
         is_hate = hate_prob > threshold
         
-        # We still need the hard prediction for the second output (target group)
         if is_hate:
             prediction_target = svm_model.predict(vec_text)[0]
             target_group = le_gold.inverse_transform([prediction_target[1]])[0]
-        else:
-            target_group = "N/A"
 
     except AttributeError: # .predict_proba() does not exist on the model
         st.warning("SVM model does not support probability estimates. Falling back to hard predictions. Threshold will not be applied.", icon="⚠️")
         prediction = svm_model.predict(vec_text)[0]
         is_hate = prediction[0] == 1
-        target_group = le_gold.inverse_transform([prediction[1]])[0] if is_hate else "N/A"
-        hate_prob = 1.0 if is_hate else 0.0 # Simulate confidence
+        hate_prob = 1.0 if is_hate else 0.0
+
+        if is_hate:
+            try:
+                target_group = le_gold.inverse_transform([prediction[1]])[0]
+            except ValueError:
+                target_group = "Unknown Category (Label Error)"
 
     suggested_action = "FLAG_FOR_REVIEW" if is_hate else "APPROVE"
     return {"is_hate_speech": is_hate, "hate_speech_confidence": hate_prob, "target_group": target_group, "suggested_action": suggested_action, "model_used": "SVM (Tamil)"}
@@ -140,7 +137,7 @@ def process_text(text: str, mode: str, threshold: float):
             lang = detect(text)
             if lang in ['en', 'ms', 'zh-cn', 'zh-tw']: return predict_with_mbert(text, threshold)
             elif lang == 'ta': return predict_with_svm(text, threshold)
-            else: return predict_with_mbert(text, threshold) # Default to mBERT
+            else: return predict_with_mbert(text, threshold)
         except LangDetectException: return predict_with_mbert(text, threshold)
     elif mode == 'mBERT (ZH, MS, EN)': return predict_with_mbert(text, threshold)
     elif mode == 'SVM (Tamil)': return predict_with_svm(text, threshold)
@@ -171,7 +168,6 @@ with tab1: # Dashboard
         if analyze_button:
             if text_input.strip():
                 with st.spinner("Analyzing text..."):
-                    # Pass the threshold from session_state to the processing function
                     result = process_text(text_input, single_analysis_mode, st.session_state.decision_threshold)
                     
                     st.write("#### Analysis Result:")
@@ -212,11 +208,10 @@ with tab1: # Dashboard
                     result = process_text(text, csv_analysis_mode, st.session_state.decision_threshold)
                     results.append(result)
                     
-                    # Update progress bar
                     progress_text = f"Analyzing comment {i+1} of {total_rows}"
                     progress_bar.progress((i + 1) / total_rows, text=progress_text)
                     
-                progress_bar.empty() # Remove progress bar after completion
+                progress_bar.empty()
                 results_df = pd.json_normalize(results)
                 st.session_state.final_df = pd.concat([df, results_df], axis=1)
                 st.success("Analysis complete! View the charts and table below.")
@@ -233,7 +228,15 @@ with tab1: # Dashboard
                     hateful_comments = st.session_state.final_df[st.session_state.final_df['is_hate_speech'] == True]
                     target_counts = hateful_comments['target_group'].dropna().value_counts()
                     if not target_counts.empty:
-                        fig_target = px.bar(x=target_counts.index, y=target_counts.values, title='Hate Speech Target Group Distribution', labels={'x':'Target Group', 'y':'Count'})
+                        # --- MODIFIED BAR CHART ---
+                        fig_target = px.bar(
+                            x=target_counts.index, 
+                            y=target_counts.values, 
+                            title='Hate Speech Target Group Distribution', 
+                            labels={'x':'Target Group', 'y':'Count'},
+                            color=target_counts.index, # Assign colors based on the category
+                            color_discrete_sequence=px.colors.qualitative.Vivid # Use a different color palette
+                        )
                         st.plotly_chart(fig_target, use_container_width=True)
                     else:
                         st.write("No hate speech detected to show target group chart.")
@@ -264,7 +267,7 @@ with tab2: # Settings
         label="Set the confidence threshold for flagging content as hateful.",
         min_value=0.50,
         max_value=0.99,
-        value=st.session_state.decision_threshold, # Use the value from session state
+        value=st.session_state.decision_threshold,
         step=0.01,
         help="A higher threshold makes the model stricter (fewer, but more confident flags). A lower threshold makes it more sensitive (more flags, potentially more errors)."
     )
@@ -300,11 +303,9 @@ with tab3: # About & How to Use
     
     if st.button("Submit Feedback"):
         if feedback_text:
-            # In a real application, you would send this feedback to a database or an email service.
-            # For this demo, we'll just show a confirmation message and print to console.
             print(f"Feedback received: {feedback_text}")
             st.success("Thank you for your feedback! We appreciate your input.")
-            st.session_state.feedback_text = "" # Clear the text area after submission
+            st.session_state.feedback_text = ""
         else:
             st.warning("Please enter some feedback before submitting.")
 
