@@ -18,3 +18,4 @@ pandas
 plotly
 langdetect
 huggingface-hub
+lime
