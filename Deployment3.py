@@ -131,7 +131,7 @@ st.sidebar.warning(
 )
 
 # --- Main Page Content ---
-st.title("Enhanced Content Moderation Dashboard")
+st.title("Content Moderation Dashboard")
 
 tab1, tab2, tab3 = st.tabs(["📊 Dashboard", "⚙️ Settings", "ℹ️ About & How to Use"])
 
