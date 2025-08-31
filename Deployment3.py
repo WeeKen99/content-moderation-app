@@ -146,7 +146,7 @@ def process_text(text: str, mode: str, threshold: float):
     elif mode == 'SVM (Tamil)': return predict_with_svm(text, threshold)
 
 # --- Main Page Content ---
-st.title("Enhanced Content Moderation Dashboard")
+st.title("Content Moderation Dashboard")
 
 tab1, tab2, tab3 = st.tabs(["📊 Dashboard", "⚙️ Settings", "ℹ️ About & How to Use"])
 
