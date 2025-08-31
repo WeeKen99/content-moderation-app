@@ -8,6 +8,29 @@ from langdetect import detect, LangDetectException
 import plotly.express as px
 from huggingface_hub import hf_hub_download
 
+st.set_page_config(layout="wide")
+
+# --- CUSTOM CSS FOR BEAUTIFICATION ---
+st.markdown("""
+<style>
+/* Main page background */
+[data-testid="stAppViewContainer"] > .main {
+    background-image: linear-gradient(180deg, #e6e9f0, #eef1f5);
+}
+
+/* Make header transparent */
+[data-testid="stHeader"] {
+    background-color: rgba(0,0,0,0);
+}
+
+/* Move toolbar to the right */
+[data-testid="stToolbar"] {
+    right: 2rem;
+}
+</style>
+""", unsafe_allow_html=True)
+
+
 # --- 1. MODEL & PREPROCESSOR LOADING ---
 @st.cache_resource
 def load_models():
@@ -131,7 +154,7 @@ st.sidebar.warning(
 )
 
 # --- Main Page Content ---
-st.title("Content Moderation Dashboard")
+st.title("Enhanced Content Moderation Dashboard")
 
 tab1, tab2, tab3 = st.tabs(["📊 Dashboard", "⚙️ Settings", "ℹ️ About & How to Use"])
 
