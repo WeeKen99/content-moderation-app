@@ -3,6 +3,7 @@ import pandas as pd
 import joblib
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import torch
+import torch.nn.functional as F
 from langdetect import detect, LangDetectException
 import plotly.express as px
 from huggingface_hub import hf_hub_download
@@ -38,63 +39,93 @@ def load_models():
 # Load all models into a dictionary
 models = load_models()
 
+# --- Initialize Session State for Threshold ---
+if 'decision_threshold' not in st.session_state:
+    st.session_state.decision_threshold = 0.90 # Default threshold
+
 # --- Constants and Labels ---
 TARGET_GROUP_LABELS_MBERT = models['target_model'].config.id2label
 
 # --- Prediction Logic ---
-def predict_with_mbert(text: str):
-    """Runs the two-stage moderation pipeline using the mBERT models."""
+def predict_with_mbert(text: str, threshold: float):
+    """Runs the two-stage moderation pipeline using mBERT and a dynamic threshold."""
     inputs = models['tokenizer'](text, return_tensors="pt", truncation=True, padding=True, max_length=512).to(models['device'])
     
     with torch.no_grad():
         binary_logits = models['binary_model'](**inputs).logits
-        binary_prediction = torch.argmax(binary_logits, dim=-1).item()
-        
-    if binary_prediction == 0:
-        return {"is_hate_speech": False, "hate_speech_confidence": 0.0, "target_group": "N/A", "suggested_action": "APPROVE", "model_used": "mBERT"}
+        # Get probabilities using softmax
+        binary_probs = F.softmax(binary_logits, dim=-1)
+        # Get the probability of the 'hateful' class (assuming it's class 1)
+        hate_prob = binary_probs[0][1].item()
 
+    is_hate_speech = hate_prob > threshold
+
+    if not is_hate_speech:
+        return {"is_hate_speech": False, "hate_speech_confidence": hate_prob, "target_group": "N/A", "suggested_action": "APPROVE", "model_used": "mBERT"}
+
+    # If it is hate speech, proceed to find the target group
     with torch.no_grad():
         target_logits = models['target_model'](**inputs).logits
         target_prediction_id = torch.argmax(target_logits, dim=-1).item()
         target_group = TARGET_GROUP_LABELS_MBERT[target_prediction_id]
 
-    return {"is_hate_speech": True, "hate_speech_confidence": 1.0, "target_group": target_group, "suggested_action": "FLAG_FOR_REVIEW", "model_used": "mBERT"}
+    return {"is_hate_speech": True, "hate_speech_confidence": hate_prob, "target_group": target_group, "suggested_action": "FLAG_FOR_REVIEW", "model_used": "mBERT"}
 
-def predict_with_svm(text: str):
-    """Runs the full moderation pipeline using the SVM model."""
+def predict_with_svm(text: str, threshold: float):
+    """Runs the moderation pipeline using SVM and a dynamic threshold."""
     vectorizer = models['tfidf_vectorizer']
     svm_model = models['svm_model']
     le_gold = models['label_encoder_gold']
-
     vec_text = vectorizer.transform([text])
-    prediction = svm_model.predict(vec_text)[0]
+
+    hate_prob = 0.0
+    is_hate = False
     
-    is_hate = prediction[0] == 1
-    target_group = le_gold.inverse_transform([prediction[1]])[0] if is_hate else "N/A"
-    
+    # Try to use predict_proba for confidence scores. Fallback to predict if not available.
+    try:
+        # Assumes the first output of the multi-output model is for hate speech classification
+        # and returns probabilities for [class_0, class_1]
+        probabilities = svm_model.predict_proba(vec_text)
+        hate_prob = probabilities[0][0][1] # Prob of hate for the first classifier
+        is_hate = hate_prob > threshold
+        
+        # We still need the hard prediction for the second output (target group)
+        if is_hate:
+            prediction_target = svm_model.predict(vec_text)[0]
+            target_group = le_gold.inverse_transform([prediction_target[1]])[0]
+        else:
+            target_group = "N/A"
+
+    except AttributeError: # .predict_proba() does not exist on the model
+        st.warning("SVM model does not support probability estimates. Falling back to hard predictions. Threshold will not be applied.", icon="⚠️")
+        prediction = svm_model.predict(vec_text)[0]
+        is_hate = prediction[0] == 1
+        target_group = le_gold.inverse_transform([prediction[1]])[0] if is_hate else "N/A"
+        hate_prob = 1.0 if is_hate else 0.0 # Simulate confidence
+
     suggested_action = "FLAG_FOR_REVIEW" if is_hate else "APPROVE"
+    return {"is_hate_speech": is_hate, "hate_speech_confidence": hate_prob, "target_group": target_group, "suggested_action": suggested_action, "model_used": "SVM (Tamil)"}
 
-    return {"is_hate_speech": is_hate, "hate_speech_confidence": None, "target_group": target_group, "suggested_action": suggested_action, "model_used": "SVM (Tamil)"}
-
-def process_text(text: str, mode: str):
-    """Master function to route text to the correct model based on user's choice."""
+def process_text(text: str, mode: str, threshold: float):
+    """Master function to route text to the correct model with the specified threshold."""
     if not isinstance(text, str) or not text.strip():
         return {"model_used": "N/A", "suggested_action": "APPROVE", "hate_speech_confidence": 0.0, "is_hate_speech": False, "target_group": None}
+    
     if mode == 'Auto-Detect Language':
         try:
             lang = detect(text)
-            if lang in ['en', 'ms', 'zh-cn', 'zh-tw']: return predict_with_mbert(text)
-            elif lang == 'ta': return predict_with_svm(text)
-            else: return predict_with_mbert(text)
-        except LangDetectException: return predict_with_mbert(text)
-    elif mode == 'mBERT (ZH, MS, EN)': return predict_with_mbert(text)
-    elif mode == 'SVM (Tamil)': return predict_with_svm(text)
+            if lang in ['en', 'ms', 'zh-cn', 'zh-tw']: return predict_with_mbert(text, threshold)
+            elif lang == 'ta': return predict_with_svm(text, threshold)
+            else: return predict_with_mbert(text, threshold) # Default to mBERT
+        except LangDetectException: return predict_with_mbert(text, threshold)
+    elif mode == 'mBERT (ZH, MS, EN)': return predict_with_mbert(text, threshold)
+    elif mode == 'SVM (Tamil)': return predict_with_svm(text, threshold)
 
 # --- Sidebar Navigation ---
 st.sidebar.title("Navigation")
-app_mode = st.sidebar.radio(
+app_mode = st.sidebar.selectbox(
     "Choose a section:",
-    ["Content Moderation Dashboard", "About & How to Use"] # Merged into one option
+    ["Dashboard", "Settings", "About & How to Use"]
 )
 
 st.sidebar.header("Disclaimer")
@@ -105,7 +136,7 @@ st.sidebar.warning(
 )
 
 # --- Page Content ---
-if app_mode == "Content Moderation Dashboard":
+if app_mode == "Dashboard":
     st.title("Enhanced Content Moderation Dashboard")
     st.markdown("Analyze comments, visualize results, and manually correct predictions.")
 
@@ -127,16 +158,22 @@ if app_mode == "Content Moderation Dashboard":
         if analyze_button:
             if text_input.strip():
                 with st.spinner("Analyzing text..."):
-                    result = process_text(text_input, single_analysis_mode)
+                    # Pass the threshold from session_state to the processing function
+                    result = process_text(text_input, single_analysis_mode, st.session_state.decision_threshold)
+                    
                     st.write("#### Analysis Result:")
                     action = result['suggested_action']
                     if action == "APPROVE": st.success(f"**Suggested Action: {action}**")
                     elif action == "FLAG_FOR_REVIEW": st.warning(f"**Suggested Action: {action}**")
                     else: st.error(f"**Suggested Action: {action}**")
+                    
                     st.write(f"**Model Used:** `{result['model_used']}`")
                     st.write(f"**Hate Speech Detected:** `{result['is_hate_speech']}`")
                     st.write(f"**Target Group:** `{result['target_group']}`")
-                    if result['hate_speech_confidence'] is not None: st.metric(label="Hate Speech Confidence", value=f"{result['hate_speech_confidence']:.2%}")
+                    
+                    if result['hate_speech_confidence'] is not None:
+                        st.metric(label="Hate Speech Confidence", value=f"{result['hate_speech_confidence']:.2%}")
+
                     with st.expander("Show raw JSON output"): st.json(result)
             else:
                 st.warning("Please enter some text to analyze.")
@@ -155,10 +192,12 @@ if app_mode == "Content Moderation Dashboard":
             st.markdown("#### Step 3: Run the analysis")
             if st.button("Analyze Comments"):
                 with st.spinner(f"Analyzing using '{csv_analysis_mode}' mode..."):
-                    results = df[text_column].apply(lambda text: process_text(text, csv_analysis_mode))
+                    # Pass the threshold to the processing function for each row
+                    results = df[text_column].apply(lambda text: process_text(text, csv_analysis_mode, st.session_state.decision_threshold))
                     results_df = pd.json_normalize(results)
                     st.session_state.final_df = pd.concat([df, results_df], axis=1)
                     st.success("Analysis complete! View the charts and table below.")
+            
             if st.session_state.final_df is not None:
                 st.markdown("---")
                 st.markdown("### Dashboard Analytics for CSV")
@@ -175,18 +214,41 @@ if app_mode == "Content Moderation Dashboard":
                         st.plotly_chart(fig_target, use_container_width=True)
                     else:
                         st.write("No hate speech detected to show target group chart.")
+                
                 st.markdown("---")
                 st.markdown("### Review and Correct Predictions for CSV")
                 st.info("You can manually change the 'suggested_action' for any row in the table below.")
                 edited_df = st.data_editor(st.session_state.final_df, column_config={"suggested_action": st.column_config.SelectboxColumn("Suggested Action", help="Manually override the model's suggestion", options=["APPROVE", "FLAG_FOR_REVIEW", "REJECT"], required=True)}, use_container_width=True, num_rows="dynamic")
                 st.session_state.final_df = edited_df
+                
                 @st.cache_data
                 def convert_df_to_csv(df_to_convert):
                     return df_to_convert.to_csv(index=False).encode('utf-8')
+                
                 csv_output = convert_df_to_csv(st.session_state.final_df)
                 st.download_button(label="📥 Download Corrected Results as CSV", data=csv_output, file_name='corrected_moderation_results.csv', mime='text/csv')
         except Exception as e:
             st.error(f"An error occurred: {e}")
+
+elif app_mode == "Settings":
+    st.title("⚙️ Model Settings")
+    st.markdown("Adjust the sensitivity of the hate speech detection models.")
+    st.markdown("---")
+    
+    st.subheader("Decision Threshold")
+    
+    st.session_state.decision_threshold = st.slider(
+        label="Set the confidence threshold for flagging content as hateful.",
+        min_value=0.50,
+        max_value=0.99,
+        value=st.session_state.decision_threshold, # Use the value from session state
+        step=0.01,
+        help="A higher threshold makes the model stricter (fewer, but more confident flags). A lower threshold makes it more sensitive (more flags, potentially more errors)."
+    )
+
+    st.info(f"Current Threshold is set to **{st.session_state.decision_threshold:.0%}** confidence.", icon="ℹ️")
+    st.write("The model will only flag a comment as hate speech if its confidence level is **above** this value.")
+
 
 elif app_mode == "About & How to Use":
     st.title("About This Application")
@@ -196,4 +258,6 @@ elif app_mode == "About & How to Use":
     Welcome to the dashboard! To begin, you can analyze your comments in bulk by uploading a CSV file.
 
     Once your file is uploaded, you have the flexibility to choose an analysis model. For convenience, the **'Auto-Detect Language'** mode is selected by default. In this mode, the system intelligently detects the language of each comment and applies the most suitable model for the analysis.
+    
+    You can adjust the model's sensitivity in the **Settings** page in the sidebar.
     """)
