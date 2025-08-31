@@ -8,6 +8,7 @@ from langdetect import detect, LangDetectException
 import plotly.express as px
 from huggingface_hub import hf_hub_download
 import time
+from datetime import datetime
 
 st.set_page_config(layout="wide")
 
@@ -194,12 +195,18 @@ with tab1: # Dashboard
     if uploaded_file is not None:
         try:
             df = pd.read_csv(uploaded_file)
+            # --- ADDED: Show number of samples imported ---
+            st.info(f"✅ Successfully imported **{len(df)}** samples from '{uploaded_file.name}'.")
+
             st.markdown("#### Step 1: Choose the analysis mode for the CSV")
             csv_analysis_mode = st.selectbox("How should the model be selected?", ('Auto-Detect Language', 'mBERT (ZH, MS, EN)', 'SVM (Tamil)'), key='csv_mode')
             st.markdown("#### Step 2: Select the column containing the text")
             text_column = st.selectbox("Which column has the comments?", df.columns)
             st.markdown("#### Step 3: Run the analysis")
             if st.button("Analyze Comments"):
+                # --- ADDED: Start timer ---
+                start_time = time.time()
+                
                 results = []
                 total_rows = len(df)
                 progress_bar = st.progress(0, text="Starting analysis...")
@@ -212,10 +219,23 @@ with tab1: # Dashboard
                     progress_bar.progress((i + 1) / total_rows, text=progress_text)
                     
                 progress_bar.empty()
+                
+                # --- ADDED: Calculate duration and completion time ---
+                end_time = time.time()
+                duration = end_time - start_time
+                completion_time_str = datetime.now().strftime("%H:%M:%S on %b %d, %Y")
+
                 results_df = pd.json_normalize(results)
                 st.session_state.final_df = pd.concat([df, results_df], axis=1)
-                st.success("Analysis complete! View the charts and table below.")
-            
+                st.success("Analysis complete! See the results below.")
+
+                # --- ADDED: Display completion stats ---
+                stat_col1, stat_col2 = st.columns(2)
+                with stat_col1:
+                    st.metric("Total Time Taken", f"{duration:.2f} seconds")
+                with stat_col2:
+                    st.metric("Completed At", completion_time_str)
+
             if st.session_state.final_df is not None:
                 st.markdown("---")
                 st.markdown("### Dashboard Analytics for CSV")
@@ -228,14 +248,13 @@ with tab1: # Dashboard
                     hateful_comments = st.session_state.final_df[st.session_state.final_df['is_hate_speech'] == True]
                     target_counts = hateful_comments['target_group'].dropna().value_counts()
                     if not target_counts.empty:
-                        # --- MODIFIED BAR CHART ---
                         fig_target = px.bar(
                             x=target_counts.index, 
                             y=target_counts.values, 
                             title='Hate Speech Target Group Distribution', 
                             labels={'x':'Target Group', 'y':'Count'},
-                            color=target_counts.index, # Assign colors based on the category
-                            color_discrete_sequence=px.colors.qualitative.Vivid # Use a different color palette
+                            color=target_counts.index,
+                            color_discrete_sequence=px.colors.qualitative.Vivid
                         )
                         st.plotly_chart(fig_target, use_container_width=True)
                     else:
