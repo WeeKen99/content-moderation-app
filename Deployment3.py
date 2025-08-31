@@ -8,6 +8,10 @@ from langdetect import detect, LangDetectException
 import plotly.express as px
 from huggingface_hub import hf_hub_download
 import time
+import numpy as np
+import lime
+from lime.lime_text import LimeTextExplainer
+import streamlit.components.v1 as components
 
 st.set_page_config(layout="wide")
 
@@ -77,9 +81,7 @@ def predict_with_mbert(text: str, threshold: float):
     
     with torch.no_grad():
         binary_logits = models['binary_model'](**inputs).logits
-        # Get probabilities using softmax
         binary_probs = F.softmax(binary_logits, dim=-1)
-        # Get the probability of the 'hateful' class (assuming it's class 1)
         hate_prob = binary_probs[0][1].item()
 
     is_hate_speech = hate_prob > threshold
@@ -87,7 +89,6 @@ def predict_with_mbert(text: str, threshold: float):
     if not is_hate_speech:
         return {"is_hate_speech": False, "hate_speech_confidence": hate_prob, "target_group": "N/A", "suggested_action": "APPROVE", "model_used": "mBERT"}
 
-    # If it is hate speech, proceed to find the target group
     with torch.no_grad():
         target_logits = models['target_model'](**inputs).logits
         target_prediction_id = torch.argmax(target_logits, dim=-1).item()
@@ -105,27 +106,22 @@ def predict_with_svm(text: str, threshold: float):
     hate_prob = 0.0
     is_hate = False
     
-    # Try to use predict_proba for confidence scores. Fallback to predict if not available.
     try:
-        # Assumes the first output of the multi-output model is for hate speech classification
-        # and returns probabilities for [class_0, class_1]
         probabilities = svm_model.predict_proba(vec_text)
-        hate_prob = probabilities[0][0][1] # Prob of hate for the first classifier
+        hate_prob = probabilities[0][0][1]
         is_hate = hate_prob > threshold
         
-        # We still need the hard prediction for the second output (target group)
         if is_hate:
             prediction_target = svm_model.predict(vec_text)[0]
             target_group = le_gold.inverse_transform([prediction_target[1]])[0]
         else:
             target_group = "N/A"
-
-    except AttributeError: # .predict_proba() does not exist on the model
+    except AttributeError:
         st.warning("SVM model does not support probability estimates. Falling back to hard predictions. Threshold will not be applied.", icon="⚠️")
         prediction = svm_model.predict(vec_text)[0]
         is_hate = prediction[0] == 1
         target_group = le_gold.inverse_transform([prediction[1]])[0] if is_hate else "N/A"
-        hate_prob = 1.0 if is_hate else 0.0 # Simulate confidence
+        hate_prob = 1.0 if is_hate else 0.0
 
     suggested_action = "FLAG_FOR_REVIEW" if is_hate else "APPROVE"
     return {"is_hate_speech": is_hate, "hate_speech_confidence": hate_prob, "target_group": target_group, "suggested_action": suggested_action, "model_used": "SVM (Tamil)"}
@@ -140,89 +136,105 @@ def process_text(text: str, mode: str, threshold: float):
             lang = detect(text)
             if lang in ['en', 'ms', 'zh-cn', 'zh-tw']: return predict_with_mbert(text, threshold)
             elif lang == 'ta': return predict_with_svm(text, threshold)
-            else: return predict_with_mbert(text, threshold) # Default to mBERT
+            else: return predict_with_mbert(text, threshold)
         except LangDetectException: return predict_with_mbert(text, threshold)
     elif mode == 'mBERT (ZH, MS, EN)': return predict_with_mbert(text, threshold)
     elif mode == 'SVM (Tamil)': return predict_with_svm(text, threshold)
 
+# --- XAI (LIME) Logic ---
+@st.cache_data(show_spinner=False)
+def generate_lime_explanation(text, model_name):
+    """Generates and returns an HTML LIME explanation."""
+    
+    # 1. Create a prediction function wrapper for LIME
+    def mbert_prediction_wrapper(texts):
+        inputs = models['tokenizer'](list(texts), return_tensors="pt", truncation=True, padding=True).to(models['device'])
+        with torch.no_grad():
+            logits = models['binary_model'](**inputs).logits
+            probs = F.softmax(logits, dim=-1).cpu().numpy()
+        return probs
+
+    def svm_prediction_wrapper(texts):
+        vec_texts = models['tfidf_vectorizer'].transform(texts)
+        # Return probabilities for the first classifier (hate/not-hate)
+        return models['svm_model'].predict_proba(vec_texts)[0]
+
+    # 2. Select the correct wrapper
+    if "mBERT" in model_name:
+        predictor = mbert_prediction_wrapper
+    elif "SVM" in model_name:
+        predictor = svm_prediction_wrapper
+    else:
+        return "<p>Explanation not available for this model type.</p>"
+
+    # 3. Create the LIME explainer and generate the explanation
+    explainer = LimeTextExplainer(class_names=['Not Hateful', 'Hateful'])
+    explanation = explainer.explain_instance(text, predictor, num_features=10, labels=(1,))
+    
+    # 4. Return the explanation as HTML
+    return explanation.as_html()
+
 # --- Main Page Content ---
-st.title("Content Moderation Dashboard")
+st.title("Enhanced Content Moderation Dashboard")
 
 tab1, tab2, tab3 = st.tabs(["📊 Dashboard", "⚙️ Settings", "ℹ️ About & How to Use"])
 
 with tab1: # Dashboard
     st.markdown("Analyze comments, visualize results, and manually correct predictions.")
+    if 'final_df' not in st.session_state: st.session_state.final_df = None
 
-    if 'final_df' not in st.session_state:
-        st.session_state.final_df = None
-
-    # --- SINGLE COMMENT ANALYSIS UI ---
     st.markdown("### Analyze a Single Comment")
     col1, col2 = st.columns(2)
     with col1:
         text_input = st.text_area("Enter the text you want to analyze:", height=150)
-        single_analysis_mode = st.selectbox(
-            "Choose the analysis mode for this comment:",
-            ('Auto-Detect Language', 'mBERT (ZH, MS, EN)', 'SVM (Tamil)'),
-            key='single_mode'
-        )
+        single_analysis_mode = st.selectbox("Choose the analysis mode:", ('Auto-Detect Language', 'mBERT (ZH, MS, EN)', 'SVM (Tamil)'), key='single_mode')
         analyze_button = st.button("Analyze Text")
     with col2:
-        if analyze_button:
-            if text_input.strip():
-                with st.spinner("Analyzing text..."):
-                    # Pass the threshold from session_state to the processing function
-                    result = process_text(text_input, single_analysis_mode, st.session_state.decision_threshold)
-                    
-                    st.write("#### Analysis Result:")
-                    action = result['suggested_action']
-                    if action == "APPROVE": st.success(f"**Suggested Action: {action}**")
-                    elif action == "FLAG_FOR_REVIEW": st.warning(f"**Suggested Action: {action}**")
-                    else: st.error(f"**Suggested Action: {action}**")
-                    
-                    st.write(f"**Model Used:** `{result['model_used']}`")
-                    st.write(f"**Hate Speech Detected:** `{result['is_hate_speech']}`")
-                    st.write(f"**Target Group:** `{result['target_group']}`")
-                    
-                    if result['hate_speech_confidence'] is not None:
-                        st.metric(label="Hate Speech Confidence", value=f"{result['hate_speech_confidence']:.2%}")
+        if analyze_button and text_input.strip():
+            result = process_text(text_input, single_analysis_mode, st.session_state.decision_threshold)
+            
+            st.write("#### Analysis Result:")
+            action = result['suggested_action']
+            if action == "APPROVE": st.success(f"**Suggested Action: {action}**")
+            elif action == "FLAG_FOR_REVIEW": st.warning(f"**Suggested Action: {action}**")
+            
+            st.write(f"**Model Used:** `{result['model_used']}`")
+            if result['hate_speech_confidence'] is not None:
+                st.metric(label="Hate Speech Confidence", value=f"{result['hate_speech_confidence']:.2%}")
+            
+            # Show LIME explanation only if hate speech is detected
+            if result['is_hate_speech']:
+                with st.expander("Why was this flagged? (Show Explanation)"):
+                    with st.spinner("Generating explanation..."):
+                        explanation_html = generate_lime_explanation(text_input, result['model_used'])
+                        components.html(explanation_html, height=250, scrolling=True)
 
-                    with st.expander("Show raw JSON output"): st.json(result)
-            else:
-                st.warning("Please enter some text to analyze.")
-
-    # --- CSV ANALYSIS UI ---
     st.markdown("---")
     st.markdown("### Analyze Comments from a CSV File")
-    uploaded_file = st.file_uploader("Upload a CSV file with your comments", type="csv")
-    if uploaded_file is not None:
+    uploaded_file = st.file_uploader("Upload a CSV file", type="csv")
+    if uploaded_file:
         try:
             df = pd.read_csv(uploaded_file)
             st.markdown("#### Step 1: Choose the analysis mode for the CSV")
-            csv_analysis_mode = st.selectbox("How should the model be selected?", ('Auto-Detect Language', 'mBERT (ZH, MS, EN)', 'SVM (Tamil)'), key='csv_mode')
-            st.markdown("#### Step 2: Select the column containing the text")
+            csv_analysis_mode = st.selectbox("Select analysis mode:", ('Auto-Detect Language', 'mBERT (ZH, MS, EN)', 'SVM (Tamil)'), key='csv_mode')
+            st.markdown("#### Step 2: Select the text column")
             text_column = st.selectbox("Which column has the comments?", df.columns)
-            st.markdown("#### Step 3: Run the analysis")
+            st.markdown("#### Step 3: Run analysis")
             if st.button("Analyze Comments"):
                 results = []
                 total_rows = len(df)
                 progress_bar = st.progress(0, text="Starting analysis...")
-
                 for i, text in enumerate(df[text_column].fillna('')):
                     result = process_text(text, csv_analysis_mode, st.session_state.decision_threshold)
                     results.append(result)
-                    
-                    # Update progress bar
                     progress_text = f"Analyzing comment {i+1} of {total_rows}"
                     progress_bar.progress((i + 1) / total_rows, text=progress_text)
-                    
-                progress_bar.empty() # Remove progress bar after completion
+                progress_bar.empty()
                 results_df = pd.json_normalize(results)
                 st.session_state.final_df = pd.concat([df, results_df], axis=1)
-                st.success("Analysis complete! View the charts and table below.")
-            
+                st.success("Analysis complete!")
+
             if st.session_state.final_df is not None:
-                st.markdown("---")
                 st.markdown("### Dashboard Analytics for CSV")
                 col1_charts, col2_charts = st.columns(2)
                 with col1_charts:
@@ -238,10 +250,9 @@ with tab1: # Dashboard
                     else:
                         st.write("No hate speech detected to show target group chart.")
                 
-                st.markdown("---")
                 st.markdown("### Review and Correct Predictions for CSV")
-                st.info("You can manually change the 'suggested_action' for any row in the table below.")
-                edited_df = st.data_editor(st.session_state.final_df, column_config={"suggested_action": st.column_config.SelectboxColumn("Suggested Action", help="Manually override the model's suggestion", options=["APPROVE", "FLAG_FOR_REVIEW", "REJECT"], required=True)}, use_container_width=True, num_rows="dynamic")
+                st.info("You can manually change the 'suggested_action' for any row.")
+                edited_df = st.data_editor(st.session_state.final_df, column_config={"suggested_action": st.column_config.SelectboxColumn("Suggested Action", help="Manually override suggestion", options=["APPROVE", "FLAG_FOR_REVIEW", "REJECT"], required=True)}, use_container_width=True, num_rows="dynamic")
                 st.session_state.final_df = edited_df
                 
                 @st.cache_data
@@ -249,7 +260,7 @@ with tab1: # Dashboard
                     return df_to_convert.to_csv(index=False).encode('utf-8')
                 
                 csv_output = convert_df_to_csv(st.session_state.final_df)
-                st.download_button(label="📥 Download Corrected Results as CSV", data=csv_output, file_name='corrected_moderation_results.csv', mime='text/csv')
+                st.download_button(label="📥 Download Corrected Results", data=csv_output, file_name='corrected_moderation_results.csv', mime='text/csv')
         except Exception as e:
             st.error(f"An error occurred: {e}")
 
@@ -257,54 +268,35 @@ with tab2: # Settings
     st.header("Model Settings")
     st.markdown("Adjust the sensitivity of the hate speech detection models.")
     st.markdown("---")
-    
     st.subheader("Decision Threshold")
-    
     st.session_state.decision_threshold = st.slider(
         label="Set the confidence threshold for flagging content as hateful.",
-        min_value=0.50,
-        max_value=0.99,
-        value=st.session_state.decision_threshold, # Use the value from session state
-        step=0.01,
-        help="A higher threshold makes the model stricter (fewer, but more confident flags). A lower threshold makes it more sensitive (more flags, potentially more errors)."
+        min_value=0.50, max_value=0.99,
+        value=st.session_state.decision_threshold, step=0.01,
+        help="A higher threshold makes the model stricter. A lower threshold makes it more sensitive."
     )
-
     st.info(f"Current Threshold is set to **{st.session_state.decision_threshold:.0%}** confidence.", icon="ℹ️")
-    st.write("The model will only flag a comment as hate speech if its confidence level is **above** this value.")
-
 
 with tab3: # About & How to Use
     st.header("About This Application")
-    st.write("This application was built to demonstrate real-time content moderation using both Transformer and classical machine learning models.")
+    st.write("This application demonstrates real-time content moderation using both Transformer and classical machine learning models.")
     st.header("How to Use This Dashboard ℹ️")
     st.markdown("""
-    Welcome to the dashboard! To begin, you can analyze your comments in bulk by uploading a CSV file.
-
-    Once your file is uploaded, you have the flexibility to choose an analysis model. For convenience, the **'Auto-Detect Language'** mode is selected by default. In this mode, the system intelligently detects the language of each comment and applies the most suitable model for the analysis.
-    
-    You can adjust the model's sensitivity in the **Settings** tab.
+    - **Dashboard**: Analyze single comments or upload a CSV for bulk analysis.
+    - **Settings**: Adjust the model's sensitivity using the decision threshold slider.
+    - **Explanations**: If a comment is flagged, click 'Why was this flagged?' to see which words influenced the decision.
     """)
-
     st.header("Disclaimer")
-    st.warning(
-        "This model is for research and educational purposes. It may not be 100% "
-        "accurate and should not be used as the sole basis for content "
-        "moderation decisions."
-    )
-
+    st.warning("This model is for research and educational purposes and may not be 100% accurate.")
     st.markdown("---")
     st.header("Provide Feedback")
     st.write("Help us improve! Share your thoughts or report any issues.")
-    
     feedback_text = st.text_area("Your feedback:", height=150, key="feedback_text")
-    
     if st.button("Submit Feedback"):
         if feedback_text:
-            # In a real application, you would send this feedback to a database or an email service.
-            # For this demo, we'll just show a confirmation message and print to console.
             print(f"Feedback received: {feedback_text}")
-            st.success("Thank you for your feedback! We appreciate your input.")
-            st.session_state.feedback_text = "" # Clear the text area after submission
+            st.success("Thank you for your feedback!")
+            st.session_state.feedback_text = ""
         else:
-            st.warning("Please enter some feedback before submitting.")
+            st.warning("Please enter feedback before submitting.")
 
