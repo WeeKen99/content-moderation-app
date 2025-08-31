@@ -144,15 +144,6 @@ def process_text(text: str, mode: str, threshold: float):
     elif mode == 'mBERT (ZH, MS, EN)': return predict_with_mbert(text, threshold)
     elif mode == 'SVM (Tamil)': return predict_with_svm(text, threshold)
 
-# --- Sidebar Content ---
-st.sidebar.title("About")
-st.sidebar.header("Disclaimer")
-st.sidebar.warning(
-    "This model is for research and educational purposes. It may not be 100% "
-    "accurate and should not be used as the sole basis for content "
-    "moderation decisions."
-)
-
 # --- Main Page Content ---
 st.title("Enhanced Content Moderation Dashboard")
 
@@ -282,4 +273,11 @@ with tab3: # About & How to Use
     
     You can adjust the model's sensitivity in the **Settings** tab.
     """)
+
+    st.header("Disclaimer")
+    st.warning(
+        "This model is for research and educational purposes. It may not be 100% "
+        "accurate and should not be used as the sole basis for content "
+        "moderation decisions."
+    )
 
