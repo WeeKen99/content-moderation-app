@@ -121,13 +121,8 @@ def process_text(text: str, mode: str, threshold: float):
     elif mode == 'mBERT (ZH, MS, EN)': return predict_with_mbert(text, threshold)
     elif mode == 'SVM (Tamil)': return predict_with_svm(text, threshold)
 
-# --- Sidebar Navigation ---
-st.sidebar.title("Navigation")
-app_mode = st.sidebar.selectbox(
-    "Choose a section:",
-    ["Dashboard", "Settings", "About & How to Use"]
-)
-
+# --- Sidebar Content ---
+st.sidebar.title("About")
 st.sidebar.header("Disclaimer")
 st.sidebar.warning(
     "This model is for research and educational purposes. It may not be 100% "
@@ -135,9 +130,12 @@ st.sidebar.warning(
     "moderation decisions."
 )
 
-# --- Page Content ---
-if app_mode == "Dashboard":
-    st.title("Enhanced Content Moderation Dashboard")
+# --- Main Page Content ---
+st.title("Enhanced Content Moderation Dashboard")
+
+tab1, tab2, tab3 = st.tabs(["📊 Dashboard", "⚙️ Settings", "ℹ️ About & How to Use"])
+
+with tab1: # Dashboard
     st.markdown("Analyze comments, visualize results, and manually correct predictions.")
 
     if 'final_df' not in st.session_state:
@@ -230,8 +228,8 @@ if app_mode == "Dashboard":
         except Exception as e:
             st.error(f"An error occurred: {e}")
 
-elif app_mode == "Settings":
-    st.title("⚙️ Model Settings")
+with tab2: # Settings
+    st.header("Model Settings")
     st.markdown("Adjust the sensitivity of the hate speech detection models.")
     st.markdown("---")
     
@@ -250,8 +248,8 @@ elif app_mode == "Settings":
     st.write("The model will only flag a comment as hate speech if its confidence level is **above** this value.")
 
 
-elif app_mode == "About & How to Use":
-    st.title("About This Application")
+with tab3: # About & How to Use
+    st.header("About This Application")
     st.write("This application was built to demonstrate real-time content moderation using both Transformer and classical machine learning models.")
     st.header("How to Use This Dashboard ℹ️")
     st.markdown("""
@@ -259,5 +257,6 @@ elif app_mode == "About & How to Use":
 
     Once your file is uploaded, you have the flexibility to choose an analysis model. For convenience, the **'Auto-Detect Language'** mode is selected by default. In this mode, the system intelligently detects the language of each comment and applies the most suitable model for the analysis.
     
-    You can adjust the model's sensitivity in the **Settings** page in the sidebar.
+    You can adjust the model's sensitivity in the **Settings** tab.
     """)
+
