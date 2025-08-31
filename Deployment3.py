@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from langdetect import detect, LangDetectException
 import plotly.express as px
 from huggingface_hub import hf_hub_download
+import time
 
 st.set_page_config(layout="wide")
 
@@ -203,12 +204,22 @@ with tab1: # Dashboard
             text_column = st.selectbox("Which column has the comments?", df.columns)
             st.markdown("#### Step 3: Run the analysis")
             if st.button("Analyze Comments"):
-                with st.spinner(f"Analyzing using '{csv_analysis_mode}' mode..."):
-                    # Pass the threshold to the processing function for each row
-                    results = df[text_column].apply(lambda text: process_text(text, csv_analysis_mode, st.session_state.decision_threshold))
-                    results_df = pd.json_normalize(results)
-                    st.session_state.final_df = pd.concat([df, results_df], axis=1)
-                    st.success("Analysis complete! View the charts and table below.")
+                results = []
+                total_rows = len(df)
+                progress_bar = st.progress(0, text="Starting analysis...")
+
+                for i, text in enumerate(df[text_column].fillna('')):
+                    result = process_text(text, csv_analysis_mode, st.session_state.decision_threshold)
+                    results.append(result)
+                    
+                    # Update progress bar
+                    progress_text = f"Analyzing comment {i+1} of {total_rows}"
+                    progress_bar.progress((i + 1) / total_rows, text=progress_text)
+                    
+                progress_bar.empty() # Remove progress bar after completion
+                results_df = pd.json_normalize(results)
+                st.session_state.final_df = pd.concat([df, results_df], axis=1)
+                st.success("Analysis complete! View the charts and table below.")
             
             if st.session_state.final_df is not None:
                 st.markdown("---")
@@ -280,4 +291,20 @@ with tab3: # About & How to Use
         "accurate and should not be used as the sole basis for content "
         "moderation decisions."
     )
+
+    st.markdown("---")
+    st.header("Provide Feedback")
+    st.write("Help us improve! Share your thoughts or report any issues.")
+    
+    feedback_text = st.text_area("Your feedback:", height=150, key="feedback_text")
+    
+    if st.button("Submit Feedback"):
+        if feedback_text:
+            # In a real application, you would send this feedback to a database or an email service.
+            # For this demo, we'll just show a confirmation message and print to console.
+            print(f"Feedback received: {feedback_text}")
+            st.success("Thank you for your feedback! We appreciate your input.")
+            st.session_state.feedback_text = "" # Clear the text area after submission
+        else:
+            st.warning("Please enter some feedback before submitting.")
 
