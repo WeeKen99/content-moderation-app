@@ -1,0 +1,12 @@
+{
+  "title": "Multilingual Hate Speech Detection",
+  "category": "NLP & RAG",
+  "summary": "mBERT and SVM classifier across 14 identity groups for content moderation, handling code-mixed and low-resource languages.",
+  "result": "14 identity groups",
+  "tags": [
+    "mBERT",
+    "HuggingFace",
+    "Streamlit"
+  ],
+  "order": 90
+}
